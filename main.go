@@ -1,14 +1,23 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"slices"
+	"strings"
 	"sync/atomic"
+
+	"github.com/callmhejerry/Chirpy/internal/database"
+	"github.com/joho/godotenv"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	DB             *database.Queries
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -47,10 +56,20 @@ type ValidChirpyResponse struct {
 }
 
 func main() {
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+
+	if err != nil {
+		log.Fatal("Failed to establish a connection to database")
+	}
+
 	mux := http.ServeMux{}
 
 	apiConfig := apiConfig{
 		fileserverHits: atomic.Int32{},
+		DB:             database.New(db),
 	}
 
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
@@ -79,8 +98,10 @@ func main() {
 			return
 		}
 
-		respondWithJSON(rw, ValidChirpyResponse{
-			Valid: true,
+		respondWithJSON(rw, struct {
+			CleanedBody string `json:"cleaned_body"`
+		}{
+			CleanedBody: maskBadWords(reqBody.Body),
 		})
 
 	})
@@ -91,6 +112,18 @@ func main() {
 	}
 
 	server.ListenAndServe()
+}
+
+func maskBadWords(content string) string {
+	badWords := [3]string{"kerfuffle", "sharbert", "fornax"}
+	words := strings.Fields(content)
+
+	for i, word := range words {
+		if slices.Contains(badWords[:], strings.ToLower(word)) {
+			words[i] = "****"
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func respondWithError(rw http.ResponseWriter, errorMessage string, statusCode int) {
