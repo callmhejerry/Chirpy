@@ -10,14 +10,24 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/callmhejerry/Chirpy/internal/database"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
+	Platform       string
+}
+
+type UserResponseModel struct {
+	Id        string    `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -40,7 +50,37 @@ func (a *apiConfig) getRequestCount(rw http.ResponseWriter, request *http.Reques
 }
 
 func (a *apiConfig) resetHandler(rw http.ResponseWriter, request *http.Request) {
+	if a.Platform != "dev" {
+		respondWithError(rw, "Unauthorized", 403)
+	}
 	a.fileserverHits.Store(0)
+	a.DB.DeleteAllUsers(request.Context())
+}
+
+func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Email string `json:"email"`
+	}
+	jsonDecoder := json.NewDecoder(request.Body)
+
+	if err := jsonDecoder.Decode(&body); err != nil {
+		respondWithError(rw, "Failed to parse json body", 400)
+		return
+	}
+
+	user, err := a.DB.CreateUser(request.Context(), body.Email)
+
+	if err != nil {
+		respondWithError(rw, "failed to create user in database", 400)
+		return
+	}
+
+	respondWithJSON(rw, UserResponseModel{
+		Id:        user.ID.String(),
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	})
 }
 
 type ChirpyError struct {
@@ -58,11 +98,12 @@ type ValidChirpyResponse struct {
 func main() {
 	godotenv.Load()
 
+	platform := os.Getenv("PLATFORM")
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 
 	if err != nil {
-		log.Fatal("Failed to establish a connection to database")
+		log.Fatalf("Failed to establish a connection to database %v", err)
 	}
 
 	mux := http.ServeMux{}
@@ -70,6 +111,7 @@ func main() {
 	apiConfig := apiConfig{
 		fileserverHits: atomic.Int32{},
 		DB:             database.New(db),
+		Platform:       platform,
 	}
 
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
@@ -105,6 +147,8 @@ func main() {
 		})
 
 	})
+
+	mux.HandleFunc("POST /api/users", apiConfig.createUserHandler)
 
 	server := http.Server{
 		Handler: &mux,
