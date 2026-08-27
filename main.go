@@ -11,8 +11,11 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/callmhejerry/Chirpy/internal/auth"
 	"github.com/callmhejerry/Chirpy/internal/database"
+	"github.com/callmhejerry/Chirpy/internal/requests"
 	"github.com/callmhejerry/Chirpy/internal/responses"
+	"github.com/callmhejerry/Chirpy/internal/utils"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -45,26 +48,36 @@ func (a *apiConfig) getRequestCount(rw http.ResponseWriter, request *http.Reques
 
 func (a *apiConfig) resetHandler(rw http.ResponseWriter, request *http.Request) {
 	if a.Platform != "dev" {
-		respondWithError(rw, "Unauthorized", 403)
+		respondWithError(rw, "Unauthorized", 403, nil)
 	}
 	a.fileserverHits.Store(0)
 	a.DB.DeleteAllUsers(request.Context())
 }
 func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Request) {
 	var body struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	jsonDecoder := json.NewDecoder(request.Body)
 
 	if err := jsonDecoder.Decode(&body); err != nil {
-		respondWithError(rw, "Failed to parse json body", 400)
+		respondWithError(rw, "Failed to parse json body", 400, err)
 		return
 	}
-
-	user, err := a.DB.CreateUser(request.Context(), body.Email)
+	hashedPassword, err := auth.HashPassword(body.Password)
 
 	if err != nil {
-		respondWithError(rw, "failed to create user in database", 400)
+		respondWithError(rw, "Something went wrong, failed to hash password", 500, err)
+		return
+	}
+	user, err := a.DB.CreateUser(request.Context(), database.CreateUserParams{
+		Email:          body.Email,
+		HashedPassword: hashedPassword,
+	})
+
+	if err != nil {
+
+		respondWithError(rw, "failed to create user in database", 400, err)
 		return
 	}
 
@@ -84,12 +97,12 @@ func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Req
 
 	jsonDecoder := json.NewDecoder(request.Body)
 	if err := jsonDecoder.Decode(&jsonBody); err != nil {
-		respondWithError(rw, "Failed to decode request", 400)
+		respondWithError(rw, "Failed to decode request", 400, err)
 		return
 	}
 	userId, err := uuid.Parse(jsonBody.UserId)
 	if err != nil {
-		respondWithError(rw, "Invalid user id", 400)
+		respondWithError(rw, "Invalid user id", 400, err)
 		return
 	}
 
@@ -98,7 +111,7 @@ func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Req
 		UserID: userId,
 	})
 	if err != nil {
-		respondWithError(rw, "Failed to create chirp in the database", 400)
+		respondWithError(rw, "Failed to create chirp in the database", 400, err)
 		return
 	}
 	rw.WriteHeader(201)
@@ -113,7 +126,7 @@ func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Req
 func (a *apiConfig) getAllChirps(rw http.ResponseWriter, request *http.Request) {
 	allChirps, err := a.DB.GetAllChirps(request.Context())
 	if err != nil {
-		respondWithError(rw, "Failed to get all chirps from database", 400)
+		respondWithError(rw, "Failed to get all chirps from database", 400, err)
 		return
 	}
 	chirpResponse := make([]responses.ChirpResponseModel, len(allChirps))
@@ -134,13 +147,13 @@ func (a *apiConfig) getChirpById(rw http.ResponseWriter, request *http.Request) 
 	chirpId, err := uuid.Parse(request.PathValue("chirpId"))
 
 	if err != nil {
-		respondWithError(rw, "Invalid chirp ID", 400)
+		respondWithError(rw, "Invalid chirp ID", 400, err)
 		return
 	}
 
 	chirp, err := a.DB.GetChirpById(request.Context(), chirpId)
 	if err != nil {
-		respondWithError(rw, "Failed to get chirp from Database", 404)
+		respondWithError(rw, "Failed to get chirp from Database", 404, err)
 		return
 	}
 	respondWithJSON(rw, responses.ChirpResponseModel{
@@ -149,6 +162,43 @@ func (a *apiConfig) getChirpById(rw http.ResponseWriter, request *http.Request) 
 		UpdatedAt: chirp.UpdatedAt,
 		UserId:    chirp.UserID.String(),
 		Body:      chirp.Body,
+	})
+}
+
+func (a *apiConfig) loginUserHandler(rw http.ResponseWriter, request *http.Request) {
+	requestBody, err := utils.ParseRequestBody[requests.LoginRequest](request.Body)
+	if err != nil {
+		respondWithError(rw, "Invalid request", 400, err)
+		return
+	}
+
+	email := requestBody.Email
+	password := requestBody.Password
+
+	user, err := a.DB.GetUserByEmail(request.Context(), email)
+
+	if err != nil {
+		respondWithError(rw, "Incorrect email or password", 401, err)
+		return
+	}
+
+	passwordMatched, err := auth.CheckPasswordHash(password, user.HashedPassword)
+
+	if err != nil {
+		respondWithError(rw, "Failed to check hashed password", 500, err)
+		return
+	}
+
+	if !passwordMatched {
+		respondWithError(rw, "Incorrect email or password", 401, password)
+		return
+	}
+
+	respondWithJSON(rw, responses.UserResponseModel{
+		Id:        user.ID.String(),
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	})
 }
 
@@ -201,11 +251,11 @@ func main() {
 		err := decoder.Decode(&reqBody)
 
 		if err != nil {
-			respondWithError(rw, "Something went wrong", 400)
+			respondWithError(rw, "Something went wrong", 400, err)
 			return
 		}
 		if len(reqBody.Body) > 140 {
-			respondWithError(rw, "Chirp is too long", 400)
+			respondWithError(rw, "Chirp is too long", 400, err)
 			return
 		}
 
@@ -221,6 +271,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiConfig.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", apiConfig.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiConfig.getChirpById)
+	mux.HandleFunc("POST /api/login", apiConfig.loginUserHandler)
 
 	server := http.Server{
 		Handler: &mux,
@@ -242,7 +293,8 @@ func maskBadWords(content string) string {
 	return strings.Join(words, " ")
 }
 
-func respondWithError(rw http.ResponseWriter, errorMessage string, statusCode int) {
+func respondWithError(rw http.ResponseWriter, errorMessage string, statusCode int, err any) {
+	fmt.Printf("ERROR : %v\n", err)
 	errorResponse, _ := json.Marshal(ChirpyError{
 		Error: errorMessage,
 	})
