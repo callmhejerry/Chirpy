@@ -130,6 +130,28 @@ func (a *apiConfig) getAllChirps(rw http.ResponseWriter, request *http.Request) 
 	respondWithJSON(rw, chirpResponse)
 }
 
+func (a *apiConfig) getChirpById(rw http.ResponseWriter, request *http.Request) {
+	chirpId, err := uuid.Parse(request.PathValue("chirpId"))
+
+	if err != nil {
+		respondWithError(rw, "Invalid chirp ID", 400)
+		return
+	}
+
+	chirp, err := a.DB.GetChirpById(request.Context(), chirpId)
+	if err != nil {
+		respondWithError(rw, "Failed to get chirp from Database", 404)
+		return
+	}
+	respondWithJSON(rw, responses.ChirpResponseModel{
+		Id:        chirpId.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		UserId:    chirp.UserID.String(),
+		Body:      chirp.Body,
+	})
+}
+
 type ChirpyError struct {
 	Error string `json:"error"`
 }
@@ -198,6 +220,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiConfig.createUserHandler)
 	mux.HandleFunc("POST /api/chirps", apiConfig.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", apiConfig.getAllChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpId}", apiConfig.getChirpById)
 
 	server := http.Server{
 		Handler: &mux,
