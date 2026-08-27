@@ -10,9 +10,10 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/callmhejerry/Chirpy/internal/database"
+	"github.com/callmhejerry/Chirpy/internal/responses"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -21,13 +22,6 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
-}
-
-type UserResponseModel struct {
-	Id        string    `json:"id"`
-	Email     string    `json:"email"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -56,7 +50,6 @@ func (a *apiConfig) resetHandler(rw http.ResponseWriter, request *http.Request) 
 	a.fileserverHits.Store(0)
 	a.DB.DeleteAllUsers(request.Context())
 }
-
 func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Request) {
 	var body struct {
 		Email string `json:"email"`
@@ -75,11 +68,45 @@ func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	respondWithJSON(rw, UserResponseModel{
+	respondWithJSON(rw, responses.UserResponseModel{
 		Id:        user.ID.String(),
 		Email:     user.Email,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
+	})
+}
+
+func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Request) {
+	var jsonBody struct {
+		Body   string `json:"body"`
+		UserId string `json:"user_id"`
+	}
+
+	jsonDecoder := json.NewDecoder(request.Body)
+	if err := jsonDecoder.Decode(&jsonBody); err != nil {
+		respondWithError(rw, "Failed to decode request", 400)
+		return
+	}
+	userId, err := uuid.Parse(jsonBody.UserId)
+	if err != nil {
+		respondWithError(rw, "Invalid user id", 400)
+		return
+	}
+
+	chirp, err := a.DB.CreateChirp(request.Context(), database.CreateChirpParams{
+		Body:   jsonBody.Body,
+		UserID: userId,
+	})
+	if err != nil {
+		respondWithError(rw, "Failed to create chirp in the database", 400)
+		return
+	}
+	rw.WriteHeader(201)
+	respondWithJSON(rw, responses.ChirpResponseModel{
+		Id:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		UserId:    chirp.UserID.String(),
 	})
 }
 
@@ -149,6 +176,7 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /api/users", apiConfig.createUserHandler)
+	mux.HandleFunc("POST /api/chirps", apiConfig.createChirpHandler)
 
 	server := http.Server{
 		Handler: &mux,
