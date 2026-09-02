@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/callmhejerry/Chirpy/internal/auth"
 	"github.com/callmhejerry/Chirpy/internal/database"
@@ -25,6 +26,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+	Secret         string
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -90,19 +92,25 @@ func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Requ
 }
 
 func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Request) {
+	token, err := auth.GetBearerToken(request.Header)
+
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+	userId, err := auth.ValidateJwt(token, a.Secret)
+
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+	}
+
 	var jsonBody struct {
-		Body   string `json:"body"`
-		UserId string `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	jsonDecoder := json.NewDecoder(request.Body)
 	if err := jsonDecoder.Decode(&jsonBody); err != nil {
 		respondWithError(rw, "Failed to decode request", 400, err)
-		return
-	}
-	userId, err := uuid.Parse(jsonBody.UserId)
-	if err != nil {
-		respondWithError(rw, "Invalid user id", 400, err)
 		return
 	}
 
@@ -120,6 +128,7 @@ func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Req
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
 		UserId:    chirp.UserID.String(),
+		Body:      chirp.Body,
 	})
 }
 
@@ -174,6 +183,13 @@ func (a *apiConfig) loginUserHandler(rw http.ResponseWriter, request *http.Reque
 
 	email := requestBody.Email
 	password := requestBody.Password
+	var expiresIn time.Duration
+
+	if requestBody.ExpiresInSeconds > 0 && requestBody.ExpiresInSeconds < int(time.Hour) {
+		expiresIn = time.Duration(requestBody.ExpiresInSeconds) * time.Second
+	} else {
+		expiresIn = 1 * time.Hour
+	}
 
 	user, err := a.DB.GetUserByEmail(request.Context(), email)
 
@@ -194,11 +210,19 @@ func (a *apiConfig) loginUserHandler(rw http.ResponseWriter, request *http.Reque
 		return
 	}
 
+	token, err := auth.MakeJWT(user.ID, a.Secret, expiresIn)
+
+	if err != nil {
+		respondWithError(rw, "Failed to generate JWT token", 500, err)
+		return
+	}
+
 	respondWithJSON(rw, responses.UserResponseModel{
 		Id:        user.ID.String(),
 		Email:     user.Email,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
+		Token:     token,
 	})
 }
 
@@ -219,6 +243,7 @@ func main() {
 
 	platform := os.Getenv("PLATFORM")
 	dbURL := os.Getenv("DB_URL")
+	secret := os.Getenv("SECRET")
 	db, err := sql.Open("postgres", dbURL)
 
 	if err != nil {
@@ -231,6 +256,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		DB:             database.New(db),
 		Platform:       platform,
+		Secret:         secret,
 	}
 
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
