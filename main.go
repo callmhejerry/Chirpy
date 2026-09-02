@@ -102,6 +102,7 @@ func (a *apiConfig) createChirpHandler(rw http.ResponseWriter, request *http.Req
 
 	if err != nil {
 		respondWithError(rw, "Unauthorized", 401, err)
+		return
 	}
 
 	var jsonBody struct {
@@ -183,13 +184,7 @@ func (a *apiConfig) loginUserHandler(rw http.ResponseWriter, request *http.Reque
 
 	email := requestBody.Email
 	password := requestBody.Password
-	var expiresIn time.Duration
-
-	if requestBody.ExpiresInSeconds > 0 && requestBody.ExpiresInSeconds < int(time.Hour) {
-		expiresIn = time.Duration(requestBody.ExpiresInSeconds) * time.Second
-	} else {
-		expiresIn = 1 * time.Hour
-	}
+	expiresIn := 1 * time.Hour
 
 	user, err := a.DB.GetUserByEmail(request.Context(), email)
 
@@ -217,13 +212,84 @@ func (a *apiConfig) loginUserHandler(rw http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	respondWithJSON(rw, responses.UserResponseModel{
-		Id:        user.ID.String(),
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Token:     token,
+	refreshToken := auth.MakeRefreshToken()
+
+	createdRefreshToken, err := a.DB.CreateRefeshToken(request.Context(), database.CreateRefeshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(60 * (24 * time.Hour)),
 	})
+
+	if err != nil {
+		respondWithError(rw, "Failed to create refresh token in database", 500, err)
+		return
+	}
+
+	respondWithJSON(rw, responses.UserResponseModel{
+		Id:           user.ID.String(),
+		Email:        user.Email,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Token:        token,
+		RefreshToken: createdRefreshToken.Token,
+	})
+}
+func (a *apiConfig) refreshTokenHandler(rw http.ResponseWriter, request *http.Request) {
+	refreshToken, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+	createdRefreshToken, err := a.DB.GetRefreshToken(request.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
+	if createdRefreshToken.RevokedAt.Valid || createdRefreshToken.ExpiresAt.Before(time.Now()) {
+		fmt.Printf("Refresh token is revoked or expired: %v\n", createdRefreshToken)
+		fmt.Printf("Current time: %v\n", time.Now())
+		fmt.Printf("Refresh token expiration time: %v\n", createdRefreshToken.ExpiresAt)
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
+	newRefreshToken := auth.MakeRefreshToken()
+
+	a.DB.UpdateRefreshToken(request.Context(), database.UpdateRefreshTokenParams{
+		UserID:    createdRefreshToken.UserID,
+		Token:     newRefreshToken,
+		ExpiresAt: time.Now().Add(60 * (24 * time.Hour)),
+	})
+
+	respondWithJSON(rw, struct {
+		Token string `json:"token"`
+	}{Token: newRefreshToken})
+}
+
+func (a *apiConfig) revokeRefreshTokenHandler(rw http.ResponseWriter, request *http.Request) {
+	refreshToken, err := auth.GetBearerToken(request.Header)
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
+	createdRefreshToken, err := a.DB.GetRefreshToken(request.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
+	if createdRefreshToken.RevokedAt.Valid || createdRefreshToken.ExpiresAt.Before(time.Now()) {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
+	a.DB.RevokeRefreshToken(request.Context(), createdRefreshToken.Token)
+
+	rw.WriteHeader(204)
 }
 
 type ChirpyError struct {
@@ -298,6 +364,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiConfig.getAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiConfig.getChirpById)
 	mux.HandleFunc("POST /api/login", apiConfig.loginUserHandler)
+	mux.HandleFunc("POST /api/refresh", apiConfig.refreshTokenHandler)
+	mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshTokenHandler)
 
 	server := http.Server{
 		Handler: &mux,
