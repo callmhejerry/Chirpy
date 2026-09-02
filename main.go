@@ -27,6 +27,7 @@ type apiConfig struct {
 	DB             *database.Queries
 	Platform       string
 	Secret         string
+	PolkaApiKey    string
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -389,6 +390,17 @@ func (a *apiConfig) deleteChirpHandler(rw http.ResponseWriter, request *http.Req
 }
 
 func (a *apiConfig) polkaWebhookHandler(rw http.ResponseWriter, request *http.Request) {
+	apiKey, err := auth.GetApiKey(request.Header)
+
+	if err != nil {
+		respondWithError(rw, err.Error(), 401, err)
+		return
+	}
+	if apiKey != a.PolkaApiKey {
+		respondWithError(rw, "Unauthorized", 401, err)
+		return
+	}
+
 	requestBody, err := utils.ParseRequestBody[struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -442,6 +454,7 @@ func main() {
 	platform := os.Getenv("PLATFORM")
 	dbURL := os.Getenv("DB_URL")
 	secret := os.Getenv("SECRET")
+	polkaApiKey := os.Getenv("POLKA_KEY")
 	db, err := sql.Open("postgres", dbURL)
 
 	if err != nil {
@@ -455,6 +468,7 @@ func main() {
 		DB:             database.New(db),
 		Platform:       platform,
 		Secret:         secret,
+		PolkaApiKey:    polkaApiKey,
 	}
 
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
