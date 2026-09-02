@@ -102,10 +102,11 @@ func (a *apiConfig) createUserHandler(rw http.ResponseWriter, request *http.Requ
 	}
 
 	respondWithJSON(rw, responses.UserResponseModel{
-		Id:        user.ID.String(),
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
+		Id:          user.ID.String(),
+		Email:       user.Email,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		IsChirpyRed: user.IsChirpyRed,
 	})
 }
 
@@ -337,15 +338,17 @@ func (a *apiConfig) updateUserHandler(rw http.ResponseWriter, request *http.Requ
 	}
 
 	respondWithJSON(rw, struct {
-		Id        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		Id          string    `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}{
-		Email:     newUser.Email,
-		Id:        newUser.ID.String(),
-		CreatedAt: newUser.CreatedAt,
-		UpdatedAt: newUser.UpdatedAt,
+		Email:       newUser.Email,
+		Id:          newUser.ID.String(),
+		CreatedAt:   newUser.CreatedAt,
+		UpdatedAt:   newUser.UpdatedAt,
+		IsChirpyRed: newUser.IsChirpyRed,
 	})
 
 }
@@ -379,6 +382,42 @@ func (a *apiConfig) deleteChirpHandler(rw http.ResponseWriter, request *http.Req
 		UserID: userId,
 	}); err != nil {
 		respondWithError(rw, "Unauthorized", 403, err)
+		return
+	}
+
+	rw.WriteHeader(204)
+}
+
+func (a *apiConfig) polkaWebhookHandler(rw http.ResponseWriter, request *http.Request) {
+	requestBody, err := utils.ParseRequestBody[struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId string `json:"user_id"`
+		} `json:"data"`
+	}](request.Body)
+
+	if err != nil {
+		respondWithError(rw, "Invalid request", 400, err)
+		return
+	}
+
+	if requestBody.Event != "user.upgraded" {
+		rw.WriteHeader(204)
+		return
+	}
+
+	userId, err := uuid.Parse(requestBody.Data.UserId)
+
+	if err != nil {
+		respondWithError(rw, "Invalid user id", 400, err)
+		return
+	}
+
+	if _, err := a.DB.UpdateUserMembership(request.Context(), database.UpdateUserMembershipParams{
+		ID:          userId,
+		IsChirpyRed: true,
+	}); err != nil {
+		respondWithError(rw, "User cannot be found", 404, err)
 		return
 	}
 
@@ -461,6 +500,7 @@ func main() {
 	mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshTokenHandler)
 	mux.Handle("PUT /api/users", apiConfig.middlewareAuth(apiConfig.updateUserHandler))
 	mux.Handle("DELETE /api/chirps/{chirpId}", apiConfig.middlewareAuth(apiConfig.deleteChirpHandler))
+	mux.HandleFunc("PUT /api/polka/webhooks", apiConfig.polkaWebhookHandler)
 
 	server := http.Server{
 		Handler: &mux,
