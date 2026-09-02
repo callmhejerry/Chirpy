@@ -36,6 +36,24 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
+func (a *apiConfig) middlewareAuth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, request *http.Request) {
+		accessToken, err := auth.GetBearerToken(request.Header)
+		if err != nil {
+			respondWithError(rw, "Unauthorized", 401, err)
+			return
+		}
+		userId, err := auth.ValidateJwt(accessToken, a.Secret)
+		if err != nil {
+			respondWithError(rw, "Unauthorized", 401, err)
+			return
+		}
+
+		request.Header.Set("X-User-ID", userId.String())
+		next.ServeHTTP(rw, request)
+	})
+}
+
 func (a *apiConfig) getRequestCount(rw http.ResponseWriter, request *http.Request) {
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	rw.WriteHeader(200)
@@ -292,6 +310,46 @@ func (a *apiConfig) revokeRefreshTokenHandler(rw http.ResponseWriter, request *h
 	rw.WriteHeader(204)
 }
 
+func (a *apiConfig) updateUserHandler(rw http.ResponseWriter, request *http.Request) {
+	requestBody, err := utils.ParseRequestBody[requests.LoginRequest](request.Body)
+	if err != nil {
+		respondWithError(rw, "Invalid request", 400, err)
+		return
+	}
+
+	userId := request.Header.Get("X-User-ID")
+	hashedPassword, err := auth.HashPassword(requestBody.Password)
+
+	if err != nil {
+		respondWithError(rw, "Something went wrong, failed to hash password", 500, err)
+		return
+	}
+
+	newUser, err := a.DB.UpdateUser(request.Context(), database.UpdateUserParams{
+		ID:             uuid.MustParse(userId),
+		Email:          requestBody.Email,
+		HashedPassword: hashedPassword,
+	})
+
+	if err != nil {
+		respondWithError(rw, "failed to update user in database", 400, err)
+		return
+	}
+
+	respondWithJSON(rw, struct {
+		Id        string    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}{
+		Email:     newUser.Email,
+		Id:        newUser.ID.String(),
+		CreatedAt: newUser.CreatedAt,
+		UpdatedAt: newUser.UpdatedAt,
+	})
+
+}
+
 type ChirpyError struct {
 	Error string `json:"error"`
 }
@@ -366,6 +424,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiConfig.loginUserHandler)
 	mux.HandleFunc("POST /api/refresh", apiConfig.refreshTokenHandler)
 	mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshTokenHandler)
+	mux.Handle("PUT /api/users", apiConfig.middlewareAuth(apiConfig.updateUserHandler))
 
 	server := http.Server{
 		Handler: &mux,
