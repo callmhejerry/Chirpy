@@ -350,6 +350,41 @@ func (a *apiConfig) updateUserHandler(rw http.ResponseWriter, request *http.Requ
 
 }
 
+func (a *apiConfig) deleteChirpHandler(rw http.ResponseWriter, request *http.Request) {
+	chirpId, err := uuid.Parse(request.PathValue("chirpId"))
+
+	if err != nil {
+		respondWithError(rw, "Invalid chirp ID", 400, err)
+		return
+	}
+	userId, err := uuid.Parse(request.Header.Get("X-User-ID"))
+	if err != nil {
+		respondWithError(rw, "Invalid user ID", 400, err)
+		return
+	}
+
+	chirp, err := a.DB.GetChirpById(request.Context(), chirpId)
+	if err != nil {
+		respondWithError(rw, "Chirp not found", 404, err)
+		return
+	}
+
+	if chirp.UserID != userId {
+		respondWithError(rw, "Unauthorized", 403, err)
+		return
+	}
+
+	if err := a.DB.DeleteChirpById(request.Context(), database.DeleteChirpByIdParams{
+		ID:     chirpId,
+		UserID: userId,
+	}); err != nil {
+		respondWithError(rw, "Unauthorized", 403, err)
+		return
+	}
+
+	rw.WriteHeader(204)
+}
+
 type ChirpyError struct {
 	Error string `json:"error"`
 }
@@ -425,6 +460,7 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", apiConfig.refreshTokenHandler)
 	mux.HandleFunc("POST /api/revoke", apiConfig.revokeRefreshTokenHandler)
 	mux.Handle("PUT /api/users", apiConfig.middlewareAuth(apiConfig.updateUserHandler))
+	mux.Handle("DELETE /api/chirps/{chirpId}", apiConfig.middlewareAuth(apiConfig.deleteChirpHandler))
 
 	server := http.Server{
 		Handler: &mux,
